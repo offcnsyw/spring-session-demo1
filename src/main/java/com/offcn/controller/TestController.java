@@ -6,7 +6,6 @@ public class TestController {
         int i = 10;
         i += 50;
         System.out.println(i);
-        i = 22;
         System.out.println("菜鸟修改的的测试代码");
     }
 }

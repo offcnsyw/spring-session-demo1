@@ -1,0 +1,167 @@
+package com.offcn.project.controller;
+
+import com.alibaba.fastjson.JSON;
+import com.offcn.dycommon.response.AppResponse;
+import com.offcn.project.contants.ProjectConstant;
+import com.offcn.project.pojo.TReturn;
+import com.offcn.project.service.ProjectCreateService;
+import com.offcn.project.vo.req.ProjectBaseInfoVo;
+import com.offcn.project.vo.req.ProjectRedisStorageVo;
+import com.offcn.project.vo.req.ProjectReturnVo;
+import com.offcn.vo.BaseVo;
+import io.swagger.annotations.Api;
+import io.swagger.annotations.ApiImplicitParam;
+import io.swagger.annotations.ApiImplicitParams;
+import io.swagger.annotations.ApiOperation;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang.StringUtils;
+import org.springframework.beans.BeanUtils;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.web.bind.annotation.*;
+
+import javax.annotation.Resource;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+
+@Api(tags = "项目基本功能模块（创建、保存、项目信息获取、文件上传等）")
+@Slf4j
+@RequestMapping("/project")
+@RestController
+public class ProjectCreateController {
+    @Resource
+    StringRedisTemplate stringRedisTemplate;
+    @Resource
+    ProjectCreateService projectCreateService;
+
+    //同意协议，准备创建项目
+    @ApiOperation("项目发起第1步-阅读同意协议")
+    @GetMapping("/init")
+    public AppResponse<String> initProject(BaseVo vo){
+        //根据流派  从redis中获取数据
+        String token = stringRedisTemplate.opsForValue().get(vo.getAccessToken());
+        //判断获取到的数据是否是空
+        if(!StringUtils.isEmpty(token)){
+            //添加项目信息
+            String msg = projectCreateService.initCreateProject(Integer.parseInt(token));
+            log.debug("用户{}添加项目成功！",token);
+            //返回结果
+            return AppResponse.ok(msg);
+        }
+        //返回错误结果
+        return AppResponse.fail("用户没有登录");
+    }
+
+    @ApiOperation("创建项目第二步--提交项目的基本信息")
+    @PostMapping("/savebaseInfo")
+    public AppResponse<String> saveBaseInfo(ProjectBaseInfoVo vo){
+        //在提交的对象中存放了项目临时的令牌  , 可以根据令牌获取对象
+        String projectJson = stringRedisTemplate.opsForValue().get(ProjectConstant.TEMP_PROJECT_PREFIX+vo.getProjectToken());
+        //判断该项目是否存在redis中
+        if(!StringUtils.isEmpty(projectJson)){
+            //将json对象转化为vo对象
+            ProjectRedisStorageVo projectVo = JSON.parseObject(projectJson, ProjectRedisStorageVo.class);
+            //复制对象的属性
+            BeanUtils.copyProperties(vo,projectVo);
+            //将对象转化为json
+            String strJson = JSON.toJSONString(projectVo);
+            //将修改后的对象重新存放到redis中
+            stringRedisTemplate.opsForValue().set(ProjectConstant.TEMP_PROJECT_PREFIX+vo.getProjectToken(),strJson,3, TimeUnit.HOURS);
+            //返回结果
+            return AppResponse.ok("添加成功!");
+        }else{
+            return AppResponse.fail("项目已过期！");
+        }
+    }
+
+    @ApiOperation("创建项目第三步--提交项目回报的信息")
+    @PostMapping("/savereturn")
+    public AppResponse<String> saveReturn(@RequestBody List<ProjectReturnVo> returns){
+        //判断是否提交上来的是空
+        if(returns.isEmpty()){
+            return AppResponse.fail("必须填写对应的回报！");
+        }else{
+            //验证项目是否过期
+            ProjectReturnVo pVo = returns.get(0);
+            String projectJson = stringRedisTemplate.opsForValue().get(ProjectConstant.TEMP_PROJECT_PREFIX + pVo.getProjectToken());
+            //判断redis中项目是否过期
+            if(StringUtils.isEmpty(projectJson)){
+                return AppResponse.fail("项目已经过期，请重新创建！");
+            }else{
+                //将json转化为对象
+                ProjectRedisStorageVo redisStorageVo = JSON.parseObject(projectJson, ProjectRedisStorageVo.class);
+                //创建一个return类的集合
+                List<TReturn> returnlist = new ArrayList<>();
+                //迭代前台传输的集合
+                for (ProjectReturnVo vo : returns) {
+                    //创建一个treturn对象
+                    TReturn t = new TReturn();
+                    //复制属性
+                    BeanUtils.copyProperties(vo,t);
+                    //放入到集合
+                    returnlist.add(t);
+                }
+                //将集合放入到redistvo对象中
+                redisStorageVo.setProjectReturns(returnlist);
+                //在将对象转化为json串
+                String jsonString = JSON.toJSONString(redisStorageVo);
+                //存入到redis中
+                stringRedisTemplate.opsForValue().set(ProjectConstant.TEMP_PROJECT_PREFIX+pVo.getProjectToken(),jsonString);
+                //返回正确的结果
+                return AppResponse.ok("ok");
+            }
+        }
+    }
+
+    @ApiOperation("项目发起第4步-项目保存项目回报信息")
+    @ApiImplicitParams({
+            @ApiImplicitParam(name = "accessToken",value = "用户令牌",required = true),
+            @ApiImplicitParam(name = "projectToken",value="项目标识",required = true),
+            @ApiImplicitParam(name="ops",value="用户操作类型 0-保存草稿 1-提交审核",required = true)})
+    @PostMapping("/submit")
+    public AppResponse<Object> submit(String accessToken,String projectToken,String ops){
+        //对比用户令牌   看是否有权限
+        accessToken = stringRedisTemplate.opsForValue().get(accessToken);
+        //判断是否登陆
+        if(!StringUtils.isEmpty(accessToken)){
+            //对比项目令牌  看项目是否存在
+            String projectJson = stringRedisTemplate.opsForValue().get(ProjectConstant.TEMP_PROJECT_PREFIX + projectToken);
+            //判断项目是否存在
+            if(!StringUtils.isEmpty(projectJson)){
+                //对比第三个选项 ops  如果是保存草稿  重新放入到redis中  如果是1 提交审核  保存到数据库
+                if(ops.equals("0")){//0-保存草稿
+                    //因为没有数据   保存
+                    stringRedisTemplate.opsForValue().set(ProjectConstant.TEMP_PROJECT_PREFIX + projectToken,projectJson,3,TimeUnit.HOURS);
+                    //返回保存草稿
+                    return AppResponse.ok("保存草稿");
+                }else if(ops.equals("1")){//1 提交审核
+                    //将json传转化为对应的对象
+                    ProjectRedisStorageVo vo = JSON.parseObject(projectJson, ProjectRedisStorageVo.class);
+                    //调用方法
+                    if(projectCreateService.saveProjectInfo(vo)){
+                        //保存成功  redis中的数据删除
+                        stringRedisTemplate.delete(ProjectConstant.TEMP_PROJECT_PREFIX+projectToken);
+                        //返回结果
+                        return AppResponse.ok("添加项目成功！");
+                    }else{
+                        AppResponse<Object> fail = AppResponse.fail(null);
+                        fail.setMsg("项目保存失败，请重试！");
+                        return fail;
+                    }
+                }else {
+                    AppResponse<Object> fail = AppResponse.fail(null);
+                    fail.setMsg("不能选择其他的状态，请重新选择！");
+                    return fail;
+                }
+            }else{
+                AppResponse<Object> fail = AppResponse.fail(null);
+                fail.setMsg("没有对应的项目信息，请重新添加项目！");
+                return fail;
+            }
+        }else{
+            AppResponse<Object> fail = AppResponse.fail(null);
+            fail.setMsg("没有对应的权限操作！");
+            return fail;
+        }
+    }
+}
